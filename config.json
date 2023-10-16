@@ -1,0 +1,10 @@
+[
+  {
+    "resource_type":"azurerm_web_application_firewall_policy",
+    "resource_name": "waf-policy",
+    "resource_id":"",     
+    "resource_group_name": "terraform-waf-rg",
+    "location": "Japan East", 
+    "waf_rules_config": "waf_rules_config.json"
+  }
+]
