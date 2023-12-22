@@ -1,57 +1,88 @@
+image: python:3.9
 stages:
   - generate_tf
+  - plan_tf
   - apply_tf
+ 
+variables:
+  TERRAFORM_VERSION: "1.6.3" # Change this to the desired version
 
-generate_tf:
+before_script: 
+  - curl -LO "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+  - unzip "terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+  - chmod +x terraform
+  - mv terraform /usr/local/bin/
+
+generate_terraform:
   stage: generate_tf
   script:
-    - mkdir TerraformArtifacts
-     # Run your Python script here to generate the .tf file
+    - if [ -d TerraformArtifacts ]; then echo "TerraformArtifacts folder exists"; else mkdir TerraformArtifacts && echo "TerraformArtifacts folder created"; fi
+    - if [ -d AzureResources ]; then echo "AzureResources folder exists"; else mkdir AzureResources && echo "AzureResources folder created"; fi
+     # Run your Python script here to generate the .tf file  
     - python3 generateTerraformUsingTemplates.py
+
+  allow_failure: false
   artifacts:
     untracked: false
     expire_in: 30 days
     when: always
     paths:
       - "TerraformArtifacts/"
-
-apply_tf:
-  stage: apply_tf
-  dependencies:
-    - generate_tf
-  script:     
-     # Install jq (JSON parser)
-    - apt-get update && apt-get install -y jq
-    # Set up Terraform (install and init)
-    - curl -fsSL https://releases.hashicorp.com/terraform/1.5.7/terraform_1.5.7_linux_arm64.zip -o terraform.zip
-    - unzip terraform.zip
-    - chmod +x terraform
-    - mv terraform /usr/local/bin/
-    - cd TerraformArtifacts
-    - terraform --version
-    - terraform init
-
-    # Import existing Azure resources
-    #- terraform import azurerm_web_application_firewall_policy.dscp-waf-policy /subscriptions/90a13e75-e07a-41b0-9438-4c3950cc72d3/resourceGroups/dscp-terraform-waf-rg/providers/Microsoft.Network/applicationGatewayWebApplicationFirewallPolicies/dscp-waf-policy
-    # Read the entire "resources.json" file and parse it
+    
+plan_terraform:
+  stage: plan_tf
+  script: 
+    - python3 generateTerraformProviderBackend.py
     - json_content=$(cat "$CI_PROJECT_DIR/config.json")
+    - cd TerraformArtifacts
+    - apt-get update && apt-get install -y jq
+     # Initialize and run Terraform using the files
+    
+    - terraform init 
 
     # Parse the JSON using jq to extract fields
     - |
       echo "$json_content" | jq -r '.[] | .resource_type, .resource_name, .resource_id' | while read -r resource_type && read -r resource_name && read -r resource_id; do
-        echo "Resource Type: $resource_type"
-        echo "Resource Name: $resource_name"
-        echo "Resource ID: $resource_id"
+        echo "Importing Azure WAF Resource: $resource_name"
 
-        terraform import "$resource_type.$resource_name" "$resource_id"
+        import_output=$(terraform import "$resource_type.$resource_name" "$resource_id" 2>&1) || true
+
+        if echo "$import_output" | grep -q "Import successful!" || echo "$import_output" | grep -q "Resource already managed by Terraform"; then
+          echo "$import_output"
+          echo "Import outcome accepted and continuing execution.."
+        else
+          echo "$import_output"
+          exit 1
+        fi
       done  
     # Run terraform plan and apply (be careful with this in a production environment)
     - terraform plan -out="waf.tfplan"
-    - terraform apply "waf.tfplan"
+     
+  needs:
+    - job: generate_terraform
+      artifacts: true
+  allow_failure: false    
+  dependencies:
+    - generate_terraform  # Ensure the artifact job runs first    
   artifacts:
     untracked: false
     expire_in: 30 days
     when: always
     paths:
       - "TerraformArtifacts/"
-
+    
+apply_terraform_configurations:
+  stage: apply_tf
+  script:
+    - cd TerraformArtifacts 
+    - terraform init -lockfile=readonly
+    - terraform apply "waf.tfplan" 
+    - rm -rf  .terraform.lock.hcl
+  when: manual
+  allow_failure: false
+  artifacts:
+    untracked: false
+    expire_in: 30 days
+    when: always
+    paths:
+      - "TerraformArtifacts/"
